@@ -11,12 +11,14 @@ def train_step(model: torch.nn.Module,
                dataloader: torch.utils.data.DataLoader, 
                loss_fn: torch.nn.Module, 
                optimizer: torch.optim.Optimizer,
-               device: torch.device) -> Tuple[float, float]:
+               device: torch.device,
+               use_amp: bool = False) -> Tuple[float, float]:
     """Trains a PyTorch model for a single epoch.
 
     Turns a target PyTorch model to training mode and then
     runs through all of the required training steps (forward
     pass, loss calculation, optimizer step).
+    Supports optional Automatic Mixed Precision (AMP) on CUDA.
 
     Args:
     model: A PyTorch model to be trained.
@@ -24,12 +26,11 @@ def train_step(model: torch.nn.Module,
     loss_fn: A PyTorch loss function to minimize.
     optimizer: A PyTorch optimizer to help minimize the loss function.
     device: A target device to compute on (e.g. "cuda" or "cpu").
+    use_amp: A boolean indicating whether to use Automatic Mixed Precision.
 
     Returns:
     A tuple of training loss and training accuracy metrics.
-    In the form (train_loss, train_accuracy). For example:
-
-    (0.1112, 0.8743)
+    In the form (train_loss, train_accuracy).
     """
     # Put model in train mode
     model.train()
@@ -37,26 +38,43 @@ def train_step(model: torch.nn.Module,
     # Setup train loss and train accuracy values
     train_loss, train_acc = 0, 0
 
+    # Hints: Disable AMP automatically if running on CPU
+    is_cuda = str(device) == "cuda" or (isinstance(device, torch.device) and device.type == "cuda")
+    run_amp = use_amp and is_cuda
+
+    # Step 3: Initialize GradScaler only if AMP is active on CUDA
+    scaler = torch.amp.GradScaler("cuda") if run_amp else None
+
     # Loop through data loader data batches
     for batch, (X, y) in enumerate(dataloader):
         # Send data to target device
         X, y = X.to(device), y.to(device)
 
-        # 1. Forward pass
-        y_pred = model(X)
+        # Step 2: Use torch.amp.autocast only when CUDA is available and AMP is enabled
+        with torch.amp.autocast(device_type="cuda", enabled=run_amp):
+            # 1. Forward pass
+            y_pred = model(X)
 
-        # 2. Calculate  and accumulate loss
-        loss = loss_fn(y_pred, y)
+            # 2. Calculate and accumulate loss
+            loss = loss_fn(y_pred, y)
+        
         train_loss += loss.item() 
 
         # 3. Optimizer zero grad
         optimizer.zero_grad()
 
-        # 4. Loss backward
-        loss.backward()
-
-        # 5. Optimizer step
-        optimizer.step()
+        # Step 3: Handle scaled backpropagation and optimizer updates
+        if run_amp and scaler is not None:
+            # Scale the loss and call backward
+            scaler.scale(loss).backward()
+            # Unscale gradients and step the optimizer
+            scaler.step(optimizer)
+            # Update the scaler for the next iteration
+            scaler.update()
+        else:
+            # Step 4: Keep standard full-precision behavior as the default path
+            loss.backward()
+            optimizer.step()
 
         # Calculate and accumulate accuracy metric across all batches
         y_pred_class = torch.argmax(torch.softmax(y_pred, dim=1), dim=1)
@@ -84,9 +102,7 @@ def test_step(model: torch.nn.Module,
 
     Returns:
     A tuple of testing loss and testing accuracy metrics.
-    In the form (test_loss, test_accuracy). For example:
-
-    (0.0223, 0.8985)
+    In the form (test_loss, test_accuracy).
     """
     # Put model in eval mode
     model.eval() 
@@ -123,7 +139,8 @@ def train(model: torch.nn.Module,
           optimizer: torch.optim.Optimizer,
           loss_fn: torch.nn.Module,
           epochs: int,
-          device: torch.device) -> Dict[str, List]:
+          device: torch.device,
+          use_amp: bool = False) -> Dict[str, List]:
     """Trains and tests a PyTorch model.
 
     Passes a target PyTorch models through train_step() and test_step()
@@ -140,20 +157,12 @@ def train(model: torch.nn.Module,
     loss_fn: A PyTorch loss function to calculate loss on both datasets.
     epochs: An integer indicating how many epochs to train for.
     device: A target device to compute on (e.g. "cuda" or "cpu").
+    use_amp: A boolean indicating whether to use Automatic Mixed Precision.
 
     Returns:
     A dictionary of training and testing loss as well as training and
     testing accuracy metrics. Each metric has a value in a list for 
     each epoch.
-    In the form: {train_loss: [...],
-              train_acc: [...],
-              test_loss: [...],
-              test_acc: [...]} 
-    For example if training for epochs=2: 
-             {train_loss: [2.0616, 1.0537],
-              train_acc: [0.3945, 0.3945],
-              test_loss: [1.2641, 1.5706],
-              test_acc: [0.3400, 0.2973]} 
     """
     # Create empty results dictionary
     results = {"train_loss": [],
@@ -167,11 +176,13 @@ def train(model: torch.nn.Module,
 
     # Loop through training and testing steps for a number of epochs
     for epoch in tqdm(range(epochs)):
+        # Pass the use_amp parameter to train_step
         train_loss, train_acc = train_step(model=model,
-                                          dataloader=train_dataloader,
-                                          loss_fn=loss_fn,
-                                          optimizer=optimizer,
-                                          device=device)
+                                           dataloader=train_dataloader,
+                                           loss_fn=loss_fn,
+                                           optimizer=optimizer,
+                                           device=device,
+                                           use_amp=use_amp)
         test_loss, test_acc = test_step(model=model,
           dataloader=test_dataloader,
           loss_fn=loss_fn,

@@ -44,15 +44,19 @@ class TinyVGG(nn.Module):
         )
         self.classifier = nn.Sequential(
           nn.Flatten(),
-          # Where did this in_features shape come from? 
-          # It's because each layer of our network compresses and changes the shape of our inputs data.
           nn.Linear(in_features=hidden_units*13*13,
                     out_features=output_shape)
         )
+        
+        self.metadata = {
+            "architecture": "TinyVGG",
+            "input_shape": input_shape,
+            "hidden_units": hidden_units,
+            "output_shape": output_shape
+        }
     
     def forward(self, x: torch.Tensor):
         x = self.conv_block_1(x)
         x = self.conv_block_2(x)
         x = self.classifier(x)
         return x
-        # return self.classifier(self.block_2(self.block_1(x))) # <- leverage the benefits of operator fusion
